@@ -7,18 +7,35 @@
 
 #include <functional>
 #include <iostream>
+#include <memory>
+#include <unordered_set>
 #include <vector>
 
-class Tensor {
+class TensorImpl {
+private:
+  std::unordered_set<TensorImpl *> children;
+  std::function<void()> grad_fn{nullptr};
+
 public:
   int *data{nullptr};
   int *grad{nullptr};
   std::vector<int> shape;
   size_t size;
 
-  // FIXME: might not need initializer_list
-  Tensor(std::initializer_list<int> list, std::vector<int> shape)
-      : shape(shape) {
+  TensorImpl(int num, std::vector<int> shape) : shape(shape) {
+    this->size = 1;
+    for (auto &item : shape) {
+      this->size *= item;
+    }
+    this->data = new int[this->size];
+    this->grad = new int[this->size];
+    for (size_t i = 0; i < this->size; i++) {
+      this->data[i] = num;
+      this->grad[i] = 0;
+    }
+  }
+
+  TensorImpl(std::vector<int> list, std::vector<int> shape) : shape(shape) {
     this->size = 1;
     for (auto &item : shape) {
       this->size *= item;
@@ -33,52 +50,12 @@ public:
     }
   }
 
-  Tensor(std::initializer_list<int> list, std::initializer_list<int> shape)
-      : Tensor(list, std::vector(shape)) {}
+  TensorImpl(std::vector<int> list)
+      : TensorImpl(list, {static_cast<int>(list.size())}) {}
 
-  Tensor(std::initializer_list<int> list)
-      : Tensor(list, {static_cast<int>(list.size())}) {}
-
-  ~Tensor() {
-    delete[] data;
-    delete[] grad;
-  }
-
-  // TODO: consider carrying gradients through copy constructor
-
-  void backward() {
-    // TODO: use topological sort instead to deal with DAGs (right now it only
-    // works for trees)
-    if (grad_fn != nullptr) {
-      grad_fn();
-      if (lhs != nullptr) {
-        lhs->backward();
-      }
-      if (rhs != nullptr) {
-        rhs->backward();
-      }
-    }
-  }
-
-  Tensor operator+(Tensor &other);
-  Tensor operator*(Tensor &other);
-  Tensor operator-();
-  Tensor operator-(Tensor &other);
-  Tensor operator/(Tensor &other);
-
-  Tensor matmul(Tensor &other);
-  Tensor transpose();
-
-  Tensor relu();
-
-private:
-  Tensor *lhs{nullptr};
-  Tensor *rhs{nullptr};
-  std::function<void()> grad_fn{nullptr};
-
-  Tensor(std::vector<int> shape, Tensor *lhs, Tensor *rhs) : shape(shape) {
-    this->lhs = lhs;
-    this->rhs = rhs;
+  TensorImpl(std::vector<int> shape,
+             std::initializer_list<TensorImpl *> children)
+      : children(children), shape(shape) {
     this->size = 1;
     for (auto &item : shape) {
       this->size *= item;
@@ -91,9 +68,92 @@ private:
     }
   }
 
-  Tensor(std::vector<int> shape, Tensor *lhs) : shape(shape) {
-    Tensor(shape, lhs, nullptr);
+  ~TensorImpl() {
+    delete[] data;
+    delete[] grad;
   }
+
+  // TODO: consider carrying gradients through copy constructor
+
+  void backward() {
+    for (size_t i = 0; i < size; i++) {
+      grad[i] = 1;
+    }
+
+    std::vector<TensorImpl *> toposort;
+    std::unordered_set<TensorImpl *> visited;
+
+    std::function<void(TensorImpl *)> dfs = [&](TensorImpl *node) {
+      if (visited.find(node) != visited.end() || node->grad_fn == nullptr) {
+        return;
+      }
+      visited.insert(node);
+      for (auto &child : node->children) {
+        dfs(child);
+      }
+      toposort.push_back(node);
+    };
+
+    dfs(this);
+
+    for (auto it = toposort.rbegin(); it != toposort.rend(); ++it) {
+      (*it)->grad_fn();
+    }
+  }
+
+  std::shared_ptr<TensorImpl> add(std::shared_ptr<TensorImpl> &other);
+  std::shared_ptr<TensorImpl> mul(std::shared_ptr<TensorImpl> &other);
+  std::shared_ptr<TensorImpl> neg();
+  std::shared_ptr<TensorImpl> sub(std::shared_ptr<TensorImpl> &other);
+  std::shared_ptr<TensorImpl> div(std::shared_ptr<TensorImpl> &other);
+
+  std::shared_ptr<TensorImpl> matmul(std::shared_ptr<TensorImpl> &other);
+  std::shared_ptr<TensorImpl> transpose();
+
+  std::shared_ptr<TensorImpl> relu();
+};
+
+class Tensor {
+private:
+
+  Tensor(std::shared_ptr<TensorImpl> impl) : impl(impl) {}
+
+public:
+  std::shared_ptr<TensorImpl> impl;
+  // TODO: check if copy constructor is called
+  Tensor(int num, std::vector<int> shape) : impl(new TensorImpl(num, shape)) {}
+  Tensor(std::vector<int> list, std::vector<int> shape)
+      : impl(new TensorImpl(list, shape)) {}
+  Tensor(std::vector<int> list) : impl(new TensorImpl(list)) {}
+
+  size_t size() { return impl->size; }
+
+  void backward() { impl->backward(); }
+
+  void print() {
+    std::cout << "[";
+    for (size_t i = 0; i < impl->size; i++) {
+      std::cout << impl->data[i] << ",";
+    }
+    std::cout << "]" << std::endl;
+  }
+
+  void printGrad() {
+    std::cout << "[";
+    for (size_t i = 0; i < impl->size; i++) {
+      std::cout << impl->grad[i] << ",";
+    }
+    std::cout << "]" << std::endl;
+  }
+
+  Tensor operator+(Tensor &other) { return Tensor(impl->add(other.impl)); }
+  Tensor operator*(Tensor &other) { return Tensor(impl->mul(other.impl)); }
+  Tensor operator-() { return Tensor(impl->neg()); }
+  Tensor operator-(Tensor &other) { return Tensor(impl->sub(other.impl)); }
+  Tensor operator/(Tensor &other) { return Tensor(impl->div(other.impl)); }
+  Tensor matmul(Tensor &other) { return Tensor(impl->matmul(other.impl)); }
+  Tensor transpose() { return Tensor(impl->transpose()); }
+  Tensor relu() { return Tensor(impl->relu()); }
 };
 
 #endif // TENSORLIBRARY_TENSOR_H
