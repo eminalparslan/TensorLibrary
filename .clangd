@@ -1,2 +1,2 @@
 CompileFlags:
-  Add: [-xc++, -Wall, -std=c++17]
+  Add: [-xc++, -Wall, -Wextra, -pedantic, -std=c++17, -ferror-limit=100]
