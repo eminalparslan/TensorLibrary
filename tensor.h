@@ -5,26 +5,28 @@
 #ifndef TENSORLIBRARY_TENSOR_H
 #define TENSORLIBRARY_TENSOR_H
 
+#include <cassert>
+#include <cmath>
 #include <functional>
 #include <iostream>
 #include <memory>
 #include <unordered_set>
 #include <vector>
-#include <cassert>
-#include <cmath>
 
 namespace nn {
-  class SGD;
+class SGD;
 }
 
 // TODO: template for other types
 // TODO: requires_grad
+// TODO: cpu, cuda, etc. flags
 class TensorImpl : public std::enable_shared_from_this<TensorImpl> {
 private:
   std::unordered_set<TensorImpl *> children;
   // TODO: Test theory of keeping out of scope Tensors (use in intermediate
   // calculations) alive with lambda by copying Tensors with lambda and
   // checking reference counts.
+  std::function<void()> calc_fn{nullptr};
   std::function<void()> grad_fn{nullptr};
 
 public:
@@ -32,6 +34,7 @@ public:
   float *grad{nullptr};
   std::vector<int> shape;
   size_t size;
+  bool realized{false};
 
   TensorImpl(float num, std::vector<int> shape) : shape(shape) {
     this->size = 1;
@@ -86,6 +89,18 @@ public:
 
   // TODO: consider carrying gradients through copy constructor
 
+  void topo_sort(std::unordered_set<TensorImpl *> &visited,
+                 std::vector<TensorImpl *> &toposort) {
+    if (visited.find(this) != visited.end()) {
+      return;
+    }
+    visited.insert(this);
+    for (auto &child : children) {
+      child->topo_sort(visited, toposort);
+    }
+    toposort.push_back(this);
+  }
+
   void backward() {
     for (size_t i = 0; i < size; i++) {
       grad[i] = 1.0f;
@@ -93,22 +108,21 @@ public:
 
     std::vector<TensorImpl *> toposort;
     std::unordered_set<TensorImpl *> visited;
-
-    std::function<void(TensorImpl *)> dfs = [&](TensorImpl *node) {
-      if (visited.find(node) != visited.end() || node->grad_fn == nullptr) {
-        return;
-      }
-      visited.insert(node);
-      for (auto &child : node->children) {
-        dfs(child);
-      }
-      toposort.push_back(node);
-    };
-
-    dfs(this);
+    topo_sort(visited, toposort);
 
     for (auto it = toposort.rbegin(); it != toposort.rend(); ++it) {
-      (*it)->grad_fn();
+      if ((*it)->grad_fn != nullptr) (*it)->grad_fn();
+    }
+  }
+
+  void forward() {
+    std::vector<TensorImpl *> toposort;
+    std::unordered_set<TensorImpl *> visited;
+
+    topo_sort(visited, toposort);
+
+    for (auto &item : toposort) {
+      if (item->calc_fn != nullptr) item->calc_fn();
     }
   }
 
@@ -150,11 +164,16 @@ private:
 
 public:
   // TODO: check if copy constructor is called
-  Tensor(float num, std::vector<int> shape)
-      : impl(new TensorImpl(num, shape)) {}
+  Tensor(float num, std::vector<int> shape) : impl(new TensorImpl(num, shape)) {
+    impl->realized = true;
+  }
   Tensor(std::vector<float> list, std::vector<int> shape)
-      : impl(new TensorImpl(list, shape)) {}
-  Tensor(std::vector<float> list) : impl(new TensorImpl(list)) {}
+      : impl(new TensorImpl(list, shape)) {
+    impl->realized = true;
+  }
+  Tensor(std::vector<float> list) : impl(new TensorImpl(list)) {
+    impl->realized = true;
+  }
 
   // TODO: copy and assignment
 
@@ -162,15 +181,23 @@ public:
   std::vector<int> shape() { return impl->shape; }
 
   void backward() { impl->backward(); }
+  Tensor &forward() {
+    impl->forward();
+    return *this;
+  }
+  Tensor &operator()() {
+    impl->forward();
+    return *this;
+  }
   void zero_grad() { impl->zero_grad(); }
 
-  Tensor grad() {
-    Tensor result = Tensor(0.0f, impl->shape);
-    for (size_t i = 0; i < impl->size; i++) {
-      result.impl->data[i] = impl->grad[i];
-    }
-    return result;
-  }
+  /*Tensor grad() {*/
+  /*  Tensor result = Tensor(0.0f, impl->shape);*/
+  /*  for (size_t i = 0; i < impl->size; i++) {*/
+  /*    result.impl->data[i] = impl->grad[i];*/
+  /*  }*/
+  /*  return result;*/
+  /*}*/
 
   float item() {
     if (impl->size != 1) {
@@ -243,6 +270,27 @@ public:
 
   Tensor &operator/=(Tensor &other) {
     impl = impl->div(other.impl);
+    return *this;
+  }
+
+  Tensor &reshape(std::vector<int> shape) {
+    // -1 for inferring size
+    int size = 1;
+    int index = -1;
+    for (size_t i = 0; i < shape.size(); i++) {
+      if (shape[i] == -1) {
+        if (index != -1) {
+          throw std::runtime_error("only one dimension can be inferred");
+        }
+        index = i;
+      } else {
+        size *= shape[i];
+      }
+    }
+    if (index != -1) {
+      shape[index] = impl->size / size;
+    }
+    impl->shape = shape;
     return *this;
   }
 

@@ -11,11 +11,14 @@ TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
       std::initializer_list<TensorImpl *>{this, other.get()});
-  for (size_t i = 0; i < max_size; i++) {
-    size_t this_index = i % this->size;
-    size_t other_index = i % other->size;
-    result->data[i] = this->data[this_index] + other->data[other_index];
-  }
+  // CUDA variant: allocate beforehand, launch kernel in calc_fn
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < max_size; i++) {
+      size_t this_index = i % this->size;
+      size_t other_index = i % other->size;
+      result->data[i] = this->data[this_index] + other->data[other_index];
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < max_size; i++) {
       size_t this_index = i % this->size;
@@ -30,9 +33,11 @@ TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
 std::shared_ptr<TensorImpl> TensorImpl::neg() {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = -this->data[i];
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = -this->data[i];
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] -= result->grad[i];
@@ -53,11 +58,13 @@ TensorImpl::mul(const std::shared_ptr<TensorImpl> &other) {
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
       std::initializer_list<TensorImpl *>{this, other.get()});
-  for (size_t i = 0; i < max_size; i++) {
-    size_t this_index = i % this->size;
-    size_t other_index = i % other->size;
-    result->data[i] = this->data[this_index] * other->data[other_index];
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < max_size; i++) {
+      size_t this_index = i % this->size;
+      size_t other_index = i % other->size;
+      result->data[i] = this->data[this_index] * other->data[other_index];
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < max_size; i++) {
       size_t this_index = i % this->size;
@@ -72,9 +79,11 @@ TensorImpl::mul(const std::shared_ptr<TensorImpl> &other) {
 std::shared_ptr<TensorImpl> TensorImpl::mul(float other) {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = this->data[i] * other;
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = this->data[i] * other;
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[i] * other;
@@ -90,11 +99,13 @@ TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
       std::initializer_list<TensorImpl *>{this, other.get()});
-  for (size_t i = 0; i < max_size; i++) {
-    size_t this_index = i % this->size;
-    size_t other_index = i % other->size;
-    result->data[i] = this->data[this_index] / other->data[other_index];
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < max_size; i++) {
+      size_t this_index = i % this->size;
+      size_t other_index = i % other->size;
+      result->data[i] = this->data[this_index] / other->data[other_index];
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < max_size; i++) {
       size_t this_index = i % this->size;
@@ -110,20 +121,25 @@ TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
 
 std::shared_ptr<TensorImpl>
 TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
+  // TODO: support batching
+  // TODO: test this function
+  // TODO: understand order of dimensions in shape vs PyTorch
   size_t n = this->shape.size();
   size_t m = other->shape.size();
   if (n == 1 && m == 1) {
     // vector-vector dot product
     assert(this->shape[0] == other->shape[0]);
-    // calculate dot product
-    float dot = 0;
-    for (size_t i = 0; i < this->size; i++) {
-      dot += this->data[i] * other->data[i];
-    }
     auto result = std::make_shared<TensorImpl>(
         std::initializer_list<int>{1},
         std::initializer_list<TensorImpl *>{this, other.get()});
-    result->data[0] = dot;
+    result->calc_fn = [=]() {
+      // calculate dot product
+      float dot = 0;
+      for (size_t i = 0; i < this->size; i++) {
+        dot += this->data[i] * other->data[i];
+      }
+      result->data[0] = dot;
+    };
     result->grad_fn = [=]() {
       for (size_t i = 0; i < this->size; i++) {
         this->grad[i] += result->grad[i] * other->data[i];
@@ -140,15 +156,17 @@ TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
     auto result = std::shared_ptr<TensorImpl>(
         new TensorImpl({p, r}, {this, other.get()}));
     // TODO: optimize by blocking
-    for (int i = 0; i < p; i++) {
-      for (int j = 0; j < r; j++) {
-        float dot = 0;
-        for (int k = 0; k < q; k++) {
-          dot += this->data[i * q + k] * other->data[k * r + j];
+    result->calc_fn = [=]() {
+      for (int i = 0; i < p; i++) {
+        for (int j = 0; j < r; j++) {
+          float dot = 0;
+          for (int k = 0; k < q; k++) {
+            dot += this->data[i * q + k] * other->data[k * r + j];
+          }
+          result->data[i * r + j] = dot;
         }
-        result->data[i * r + j] = dot;
       }
-    }
+    };
     result->grad_fn = [=]() {
       for (int i = 0; i < p; i++) {
         for (int j = 0; j < r; j++) {
@@ -170,14 +188,15 @@ TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
     auto result = std::make_shared<TensorImpl>(
         std::initializer_list<int>{p},
         std::initializer_list<TensorImpl *>{this, other.get()});
-
-    for (int i = 0; i < p; i++) {
-      float dot = 0;
-      for (int k = 0; k < q; k++) {
-        dot += this->data[i * q + k] * other->data[k];
+    result->calc_fn = [=]() {
+      for (int i = 0; i < p; i++) {
+        float dot = 0;
+        for (int k = 0; k < q; k++) {
+          dot += this->data[i * q + k] * other->data[k];
+        }
+        result->data[i] = dot;
       }
-      result->data[i] = dot;
-    }
+    };
     result->grad_fn = [=]() {
       for (int i = 0; i < p; i++) {
         for (int k = 0; k < q; k++) {
@@ -195,13 +214,15 @@ TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
     auto result = std::make_shared<TensorImpl>(
         std::initializer_list<int>{q},
         std::initializer_list<TensorImpl *>{this, other.get()});
-    for (int j = 0; j < q; j++) {
-      float dot = 0;
-      for (int k = 0; k < p; k++) {
-        dot += this->data[k] * other->data[k * q + j];
+    result->calc_fn = [=]() {
+      for (int j = 0; j < q; j++) {
+        float dot = 0;
+        for (int k = 0; k < p; k++) {
+          dot += this->data[k] * other->data[k * q + j];
+        }
+        result->data[j] = dot;
       }
-      result->data[j] = dot;
-    }
+    };
     result->grad_fn = [=]() {
       for (int j = 0; j < q; j++) {
         for (int k = 0; k < p; k++) {
@@ -229,12 +250,14 @@ std::shared_ptr<TensorImpl> TensorImpl::transpose(size_t dim0, size_t dim1) {
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{this->shape[dim1], this->shape[dim0]},
       std::initializer_list<TensorImpl *>{this});
-  for (int i = 0; i < this->shape[dim0]; i++) {
-    for (int j = 0; j < this->shape[dim1]; j++) {
-      result->data[j * this->shape[dim0] + i] =
-          this->data[i * this->shape[dim1] + j];
+  result->calc_fn = [=]() {
+    for (int i = 0; i < this->shape[dim0]; i++) {
+      for (int j = 0; j < this->shape[dim1]; j++) {
+        result->data[j * this->shape[dim0] + i] =
+            this->data[i * this->shape[dim1] + j];
+      }
     }
-  }
+  };
   result->grad_fn = [=]() {
     for (int i = 0; i < this->shape[dim0]; i++) {
       for (int j = 0; j < this->shape[dim1]; j++) {
@@ -249,9 +272,11 @@ std::shared_ptr<TensorImpl> TensorImpl::transpose(size_t dim0, size_t dim1) {
 std::shared_ptr<TensorImpl> TensorImpl::relu() {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = this->data[i] > 0.0f ? this->data[i] : 0.0f;
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = this->data[i] > 0.0f ? this->data[i] : 0.0f;
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[i] * (this->data[i] > 0.0f ? 1.0f : 0.0f);
@@ -263,9 +288,11 @@ std::shared_ptr<TensorImpl> TensorImpl::relu() {
 std::shared_ptr<TensorImpl> TensorImpl::sigmoid() {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = 1.0f / (1.0f + std::exp(-this->data[i]));
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = 1.0f / (1.0f + std::exp(-this->data[i]));
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       float s = 1.0f / (1.0f + std::exp(-this->data[i]));
@@ -278,9 +305,11 @@ std::shared_ptr<TensorImpl> TensorImpl::sigmoid() {
 std::shared_ptr<TensorImpl> TensorImpl::log() {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = std::log(this->data[i]);
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = std::log(this->data[i]);
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[i] / this->data[i];
@@ -292,9 +321,11 @@ std::shared_ptr<TensorImpl> TensorImpl::log() {
 std::shared_ptr<TensorImpl> TensorImpl::exp() {
   auto result = std::make_shared<TensorImpl>(
       this->shape, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[i] = std::exp(this->data[i]);
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[i] = std::exp(this->data[i]);
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[i] * result->data[i];
@@ -306,9 +337,11 @@ std::shared_ptr<TensorImpl> TensorImpl::exp() {
 std::shared_ptr<TensorImpl> TensorImpl::sum() {
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[0] += this->data[i];
-  }
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[0] += this->data[i];
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[0];
@@ -320,10 +353,12 @@ std::shared_ptr<TensorImpl> TensorImpl::sum() {
 std::shared_ptr<TensorImpl> TensorImpl::max() {
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
-  result->data[0] = this->data[0];
-  for (size_t i = 1; i < this->size; i++) {
-    result->data[0] = std::max(result->data[0], this->data[i]);
-  }
+  result->calc_fn = [=]() {
+    result->data[0] = this->data[0];
+    for (size_t i = 1; i < this->size; i++) {
+      result->data[0] = std::max(result->data[0], this->data[i]);
+    }
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       if (this->data[i] == result->data[0]) {
@@ -337,10 +372,12 @@ std::shared_ptr<TensorImpl> TensorImpl::max() {
 std::shared_ptr<TensorImpl> TensorImpl::mean() {
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
-  for (size_t i = 0; i < this->size; i++) {
-    result->data[0] += this->data[i];
-  }
-  result->data[0] /= this->size;
+  result->calc_fn = [=]() {
+    for (size_t i = 0; i < this->size; i++) {
+      result->data[0] += this->data[i];
+    }
+    result->data[0] /= this->size;
+  };
   result->grad_fn = [=]() {
     for (size_t i = 0; i < this->size; i++) {
       this->grad[i] += result->grad[0] / this->size;
@@ -352,12 +389,14 @@ std::shared_ptr<TensorImpl> TensorImpl::mean() {
 std::shared_ptr<TensorImpl> TensorImpl::argmax() {
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
-  result->data[0] = 0;
-  for (size_t i = 1; i < this->size; i++) {
-    if (this->data[i] > this->data[(int)result->data[0]]) {
-      result->data[0] = i;
+  result->calc_fn = [=]() {
+    result->data[0] = 0;
+    for (size_t i = 1; i < this->size; i++) {
+      if (this->data[i] > this->data[(int)result->data[0]]) {
+        result->data[0] = i;
+      }
     }
-  }
+  };
   result->grad_fn = [=]() {
     this->grad[(int)result->data[0]] += result->grad[0];
   };
@@ -383,10 +422,12 @@ TensorImpl::nll_loss(const std::shared_ptr<TensorImpl> &other) {
   int num_classes = this->shape[1];
   auto result = std::make_shared<TensorImpl>(
       other->shape, std::initializer_list<TensorImpl *>{this, other.get()});
-  for (int i = 0; i < batch_size; i++) {
-    result->data[i] -=
-        this->data[i * num_classes + (int)std::round(other->data[i])];
-  }
+  result->calc_fn = [=]() {
+    for (int i = 0; i < batch_size; i++) {
+      result->data[i] -=
+          this->data[i * num_classes + (int)std::round(other->data[i])];
+    }
+  };
   result->grad_fn = [=]() {
     for (int i = 0; i < batch_size; i++) {
       this->grad[i * num_classes + (int)std::round(other->data[i])] -=

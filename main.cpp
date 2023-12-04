@@ -50,7 +50,7 @@ int main() {
   nn::Linear l2 = nn::Linear(128, 64);
   nn::Linear l3 = nn::Linear(64, 10);
 
-  nn::SGD sgd({l1.weight, l1.bias, l2.weight, l2.bias}, 0.001f);
+  nn::SGD sgd({l1.weight, l1.bias, l2.weight, l2.bias, l3.weight, l3.bias}, 0.001f);
   auto loss = nn::CrossEntropyLoss();
 
   int steps = 30000;
@@ -74,6 +74,8 @@ int main() {
     Tensor e = d.relu();
     Tensor f = l3(e);
     Tensor h = loss(f, Tensor({static_cast<float>(label)}, {1}));
+    // realize the computation graph
+    h();
 
     h.backward();
 
@@ -99,8 +101,9 @@ int main() {
     Tensor d = l2(c);
     Tensor e = d.relu();
     Tensor f = l3(e);
+    f();
 
-    if ((int) f.argmax().item() == label) {
+    if ((int) f.argmax()().item() == label) {
       correct++;
     }
   }
@@ -119,6 +122,7 @@ int main2() {
   Tensor f = Tensor({-2.0f, 9.0f, 3.0f, 5.0f}, {1, 4});
   Tensor g = d.relu() + f + e;
   Tensor L = g.cross_entropy_loss(Tensor({1.0f}, {1}));
+  L();
   L.print();
   L.backward();
 
