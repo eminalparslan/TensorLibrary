@@ -39,8 +39,8 @@ public:
   float *data{nullptr};
   float *grad{nullptr};
 
-  void *cuda_data{nullptr};
-  void *cuda_grad{nullptr};
+  float *cuda_data{nullptr};
+  float *cuda_grad{nullptr};
 
   std::vector<int> shape;
   size_t size;
@@ -49,8 +49,6 @@ public:
   Backend backend{Backend::CPU};
   bool realized{false};
   
-  static CUDAInitializer cuda_initializer;
-
   TensorImpl(float num, std::vector<int> shape) : shape(shape) {
     this->size = 1;
     for (auto &item : shape) {
@@ -120,7 +118,6 @@ public:
       return;
     } else if (this->backend == Backend::CUDA) {
       if (backend == Backend::CPU) {
-        std::cout << "CUDA -> CPU" << std::endl;
         cudaMemcpy(data, cuda_data, size * sizeof(float), cudaMemcpyDeviceToHost);
         cudaMemcpy(grad, cuda_grad, size * sizeof(float), cudaMemcpyDeviceToHost);
         cudaFree(cuda_data);
@@ -165,15 +162,30 @@ public:
     }
   }
 
+  void print() {
+    // TODO: check if realized
+    std::cout << "[";
+    for (size_t i = 0; i < this->size; i++) {
+      std::cout << this->data[i] << ",";
+    }
+    std::cout << "]" << std::endl;
+  }
+
   void forward() {
     std::vector<TensorImpl *> toposort;
     std::unordered_set<TensorImpl *> visited;
-
     topo_sort(visited, toposort);
 
     for (auto &item : toposort) {
       if (item->realized) continue;
       if (item->calc_fn != nullptr) item->calc_fn();
+      cudaDeviceSynchronize();
+    }
+    
+    for (auto &item : toposort) {
+      if (item->backend == Backend::CUDA) {
+        item->toDevice(Backend::CPU);
+      }
       item->realized = true;
     }
   }

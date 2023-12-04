@@ -45,18 +45,6 @@ void load_MNIST(std::vector<std::pair<int, std::vector<float>>> &images) {
   labelf.close();
 }
 
-int main3() {
-  Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4});
-  a.toDevice(Backend::CUDA);
-  Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4});
-  b.toDevice(Backend::CUDA);
-  
-  Tensor c = a + b;
-  c();
-  c.toDevice(Backend::CPU);
-  c.print();
-}
-
 int main2() {
   std::vector<std::pair<int, std::vector<float>>> images;
   load_MNIST(images);
@@ -141,12 +129,12 @@ int main() {
   L();
   L.print();
   L.backward();
+  
+  // TODO: CUDA for matmul, CUDA grads, train on CUDA, maybe try lazy synchronization, batch performance, CUDA graph
 
   a.print_grad();
   b.print_grad();
   c.print_grad();
-  
-  //test_saxpy();
   
   return 0;
 }

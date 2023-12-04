@@ -4,43 +4,6 @@
 
 #include "tensor.h"
 
-void launch_kernel(const char *kernel, const char *name, void *args[]) {
-  nvrtcProgram prog;
-  NVRTC_SAFE_CALL(nvrtcCreateProgram(&prog, kernel, name, 0, nullptr, nullptr));
-  const char *opts[] = {"--fmad=false"};
-  nvrtcResult compileResult = nvrtcCompileProgram(prog, 1, opts);
-
-  size_t logSize;
-  NVRTC_SAFE_CALL(nvrtcGetProgramLogSize(prog, &logSize));
-  std::cout << "Kernel compilation log:" << std::endl;
-  if (logSize > 1) {
-    char *log = new char[logSize];
-    NVRTC_SAFE_CALL(nvrtcGetProgramLog(prog, log));
-    std::cout << log << std::endl;
-    delete[] log;
-  }
-
-  if (compileResult != NVRTC_SUCCESS) {
-    throw std::runtime_error("Kernel compilation failed");
-  }
-  
-  size_t ptxSize;
-  NVRTC_SAFE_CALL(nvrtcGetPTXSize(prog, &ptxSize));
-  char *ptx = new char[ptxSize];
-  NVRTC_SAFE_CALL(nvrtcGetPTX(prog, ptx));
-  NVRTC_SAFE_CALL(nvrtcDestroyProgram(&prog));
-
-  CUmodule module;
-  CUfunction kernel_func;
-  CUDA_SAFE_CALL(cuModuleLoadDataEx(&module, ptx, 0, 0, 0));
-  CUDA_SAFE_CALL(cuModuleGetFunction(&kernel_func, module, name));
-  
-  CUDA_SAFE_CALL(cuLaunchKernel(kernel_func, NUM_BLOCKS, 1, 1, NUM_THREADS, 1, 1, 0, nullptr, args, 0));
-  // TODO: synchronize lazily
-  CUDA_SAFE_CALL(cuCtxSynchronize());
-  CUDA_SAFE_CALL(cuModuleUnload(module));
-}
-
 std::shared_ptr<TensorImpl>
 TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
   // TODO: check dimensions
@@ -58,8 +21,7 @@ TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
         result->data[i] = this->data[this_index] + other->data[other_index];
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
-      launch_kernel(kernel_add, "add", args);
+      kernel_add(max_size, this->cuda_data, other->cuda_data, result->cuda_data, this->size, other->size);
     }
   };
   result->grad_fn = [=]() {
@@ -82,8 +44,7 @@ std::shared_ptr<TensorImpl> TensorImpl::neg() {
         result->data[i] = -this->data[i];
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_neg, "neg", args);
+      kernel_neg(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -115,8 +76,7 @@ TensorImpl::mul(const std::shared_ptr<TensorImpl> &other) {
         result->data[i] = this->data[this_index] * other->data[other_index];
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
-      launch_kernel(kernel_mul, "mul", args);
+      kernel_mul(max_size, this->cuda_data, other->cuda_data, result->cuda_data, this->size, other->size);
     }
   };
   result->grad_fn = [=]() {
@@ -163,8 +123,7 @@ TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
         result->data[i] = this->data[this_index] / other->data[other_index];
       }
     } else if (backend == Backend::CUDA) {
-      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
-      launch_kernel(kernel_div, "div", args);
+      kernel_div(max_size, this->cuda_data, other->cuda_data, result->cuda_data, this->size, other->size);
     }
   };
   result->grad_fn = [=]() {
@@ -214,8 +173,7 @@ TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
         }
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {(void*)&batch_size, (void*)&dim0, (void*)&dim1, (void*)&dim2, &this->cuda_data, &other->cuda_data, &result->cuda_data};
-      launch_kernel(kernel_matmul, "matmul", args);
+      //kernel_matmul(batch_size, dim0, dim1, dim2, this->cuda_data, other->cuda_data, result->cuda_data);
     }
   };
   result->grad_fn = [=]() {
@@ -272,8 +230,7 @@ std::shared_ptr<TensorImpl> TensorImpl::relu() {
         result->data[i] = this->data[i] > 0.0f ? this->data[i] : 0.0f;
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_relu, "relu", args);
+      kernel_relu(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -311,8 +268,7 @@ std::shared_ptr<TensorImpl> TensorImpl::log() {
         result->data[i] = std::log(this->data[i]);
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_log, "log", args);
+      kernel_log(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -332,8 +288,7 @@ std::shared_ptr<TensorImpl> TensorImpl::exp() {
         result->data[i] = std::exp(this->data[i]);
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_exp, "exp", args);
+      kernel_exp(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -353,8 +308,7 @@ std::shared_ptr<TensorImpl> TensorImpl::sum() {
         result->data[0] += this->data[i];
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_sum, "sum", args);
+      kernel_sum(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -375,8 +329,7 @@ std::shared_ptr<TensorImpl> TensorImpl::max() {
         result->data[0] = std::max(result->data[0], this->data[i]);
       }
     } else if (result->backend == Backend::CUDA) {
-      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
-      launch_kernel(kernel_max, "max", args);
+      kernel_max(this->cuda_data, result->cuda_data, this->size);
     }
   };
   result->grad_fn = [=]() {
@@ -446,8 +399,12 @@ TensorImpl::nll_loss(const std::shared_ptr<TensorImpl> &other) {
   auto result = std::make_shared<TensorImpl>(
       other->shape, std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
   result->calc_fn = [=]() {
-    for (int i = 0; i < batch_size; i++) {
-      result->data[i] = -this->data[i * num_classes + (int)std::round(other->data[i])];
+    if (result->backend == Backend::CPU) {
+      for (int i = 0; i < batch_size; i++) {
+        result->data[i] = -this->data[i * num_classes + (int)std::round(other->data[i])];
+      }
+    } else if (result->backend == Backend::CUDA) {
+      kernel_nll_loss(this->cuda_data, other->cuda_data, result->cuda_data, batch_size, num_classes);
     }
   };
   result->grad_fn = [=]() {

@@ -32,37 +32,17 @@
     }                                                             \
 } while(0)
 
-extern const char *saxpy;
-extern const char *kernel_add;
-extern const char *kernel_neg;
-extern const char *kernel_mul;
-extern const char *kernel_div;
-extern const char *kernel_matmul;
-extern const char *kernel_relu;
-extern const char *kernel_log;
-extern const char *kernel_exp;
-extern const char *kernel_sum;
-extern const char *kernel_max;
-extern const char *kernel_mean;
-extern const char *kernel_nll_loss;
-
-class CUDAInitializer {
-public:
-  CUdevice cuDevice;
-  CUcontext cuContext;
-  
-  CUDAInitializer() {
-  // FIXME: doesn't work
-    std::cout << "Initializing CUDA context\n";
-    CUDA_SAFE_CALL(cuInit(0));
-    CUDA_SAFE_CALL(cuDeviceGet(&cuDevice, 0));
-    CUDA_SAFE_CALL(cuCtxCreate(&cuContext, 0, cuDevice));
-  }
-  
-  ~CUDAInitializer() {
-    std::cout << "Destroying CUDA context\n";
-    CUDA_SAFE_CALL(cuCtxDestroy(cuContext));
-  }
-};  
+void kernel_add(int max_size, float *x, float *y, float *out, int x_size, int y_size);
+void kernel_neg(float *x, float *out, int x_size);
+void kernel_mul(int max_size, float *x, float *y, float *out, int x_size, int y_size);
+void kernel_div(int max_size, float *x, float *y, float *out, int x_size, int y_size);
+void kernel_log(float *x, float *out, int x_size);
+void kernel_exp(float *x, float *out, int x_size);
+void kernel_sum(float *x, float *out, int x_size);
+void kernel_max(float *x, float *out, int x_size);
+void kernel_matmul(int max_size, float *x, float *y, float *out, int x_size, int y_size, int dim0,
+                   int dim1, int dim2);
+void kernel_relu(float *x, float *out, int x_size);
+void kernel_nll_loss(float *x, float *y, float *out, int x_size, int y_size);
 
 #endif // TENSORLIBRARY_KERNELS_H
