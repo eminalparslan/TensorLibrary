@@ -100,17 +100,10 @@ TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
       size_t this_index = i % this->size;
       size_t other_index = i % other->size;
       this->grad[this_index] += result->grad[i] / other->data[other_index];
-      other->grad[other_index] += result->grad[i] * (-this->data[this_index] /
-                                                     other->data[other_index]);
+      other->grad[other_index] -=
+          result->grad[i] * this->data[this_index] /
+          (other->data[other_index] * other->data[other_index]);
     }
-    /* result->grad_fn = [=]() { */
-    /*   for (size_t i = 0; i < this->size; i++) { */
-    /*     this->grad[i] += result->grad[i] / other->data[i]; */
-    /*     other->grad[i] -= */
-    /*         result->grad[i] * this->data[i] / (other->data[i] *
-     * other->data[i]); */
-    /*   } */
-    /* }; */
   };
   return result;
 }

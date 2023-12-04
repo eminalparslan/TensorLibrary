@@ -114,12 +114,11 @@ int main2() {
   Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4});
   Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4});
   Tensor c = Tensor({-8.0f, 2.0f, -3.0f, 7.0f}, {4});
-  Tensor e = a * b;
+  Tensor e = a / b;
   Tensor d = -e + c;
   Tensor f = Tensor({-2.0f, 9.0f, 3.0f, 5.0f}, {1, 4});
   Tensor g = d.relu() + f + e;
   Tensor L = g.cross_entropy_loss(Tensor({1.0f}, {1}));
-  L();
   L.print();
   L.backward();
 
