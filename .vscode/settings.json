@@ -1,0 +1,7 @@
+{
+  "files.associations": {
+    "*.log": "csv",
+    "cmath": "cpp"
+  },
+  "C_Cpp.default.compilerPath": "/usr/local/cuda/bin/nvcc"
+}

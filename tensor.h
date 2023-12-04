@@ -10,6 +10,8 @@
 #include <memory>
 #include <unordered_set>
 #include <vector>
+#include <cassert>
+#include <cmath>
 
 namespace nn {
   class SGD;

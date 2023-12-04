@@ -1,8 +1,10 @@
 #include "nn.h"
 #include "optimizer.h"
 #include "tensor.h"
+#include "kernels.h"
 #include <fstream>
 #include <iostream>
+#include <cassert>
 
 void reverse_bytes(char *bytes, int size) {
   for (int i = 0; i < size / 2; i++) {
@@ -52,7 +54,7 @@ int main() {
   auto loss = nn::CrossEntropyLoss();
 
   int steps = 30000;
-  assert(steps < images.size());
+  /*assert(steps < (int)(images.size());*/
   for (int i = 0; i < steps; i++) {
     auto image = images[i];
     int label = image.first;
@@ -117,11 +119,15 @@ int main2() {
   Tensor f = Tensor({-2.0f, 9.0f, 3.0f, 5.0f}, {1, 4});
   Tensor g = d.relu() + f + e;
   Tensor L = g.cross_entropy_loss(Tensor({1.0f}, {1}));
+  L();
   L.print();
   L.backward();
 
   a.print_grad();
   b.print_grad();
   c.print_grad();
+  
+  //test_saxpy();
+  
   return 0;
 }
