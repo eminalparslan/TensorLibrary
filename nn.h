@@ -26,6 +26,12 @@ public:
         bias(Tensor::from_kaiming_uniform({out_features})) {}
 
   Tensor operator()(Tensor x) { return x.matmul(weight) + bias; }
+  
+  Linear &toDevice(Backend backend) {
+    weight.toDevice(backend);
+    bias.toDevice(backend);
+    return *this;
+  }
 };
 
 class ReLU {

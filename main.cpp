@@ -45,7 +45,7 @@ void load_MNIST(std::vector<std::pair<int, std::vector<float>>> &images) {
   labelf.close();
 }
 
-int main2() {
+int main() {
   std::vector<std::pair<int, std::vector<float>>> images;
   load_MNIST(images);
 
@@ -70,14 +70,18 @@ int main2() {
     }
 
     sgd.zero_grad();
+    
+    l1.toDevice(Backend::CUDA);
+    l2.toDevice(Backend::CUDA);
+    l3.toDevice(Backend::CUDA);
 
-    Tensor a = Tensor(data, {1, 28 * 28});
+    Tensor a = Tensor(data, {1, 28 * 28}).toDevice(Backend::CUDA);
     Tensor b = l1(a);
     Tensor c = b.relu();
     Tensor d = l2(c);
     Tensor e = d.relu();
     Tensor f = l3(e);
-    Tensor h = loss(f.reshape({1, -1}), Tensor({static_cast<float>(label)}, {1}));
+    Tensor h = loss(f.reshape({1, -1}), Tensor({static_cast<float>(label)}, {1}).toDevice(Backend::CUDA));
     // realize the computation graph
     h();
     // compute the gradients
@@ -85,6 +89,10 @@ int main2() {
     // update the parameters
     sgd.step();
   }
+  
+  l1.toDevice(Backend::CPU);
+  l2.toDevice(Backend::CPU);
+  l3.toDevice(Backend::CPU);
 
   int test_steps = 1000;
   int correct = 0;
@@ -117,7 +125,7 @@ int main2() {
   return 0;
 }
 
-int main() {
+int main2() {
   Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4}).toDevice(Backend::CUDA);
   Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4}).toDevice(Backend::CUDA);
   Tensor c = Tensor({-8.0f, 2.0f, -3.0f, 7.0f}, {4}).toDevice(Backend::CUDA);

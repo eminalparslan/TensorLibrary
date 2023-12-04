@@ -1,7 +1,7 @@
 CC = nvcc
-CC_RELEASE_FLAGS = --compiler-options -std=c++17 -O3 -I/usr/local/cuda/include -lcuda -lnvrtc
+CC_RELEASE_FLAGS = --compiler-options -std=c++17 -O3 -I/usr/local/cuda/include -lcuda
 # -ffp-model=fast
-CC_DEBUG_FLAGS = --compiler-options -Wall -std=c++17 -g -I/usr/local/cuda/include -lcuda -lnvrtc
+CC_DEBUG_FLAGS = --compiler-options -Wall -std=c++17 -g -I/usr/local/cuda/include -lcuda
 # -fdiagnostics-show-template-tree
 # -fsanitize=address 
 CC_FLAGS = $(CC_DEBUG_FLAGS)

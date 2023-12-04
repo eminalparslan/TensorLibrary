@@ -35,13 +35,19 @@ public:
 
   void step() {
     for (auto &param : this->parameters) {
-      for (size_t i = 0; i < param.size(); i++) {
-        param.impl->data[i] -= param.impl->grad[i] * this->learning_rate;
+      param.impl->toDevice(Backend::CPU);
+      if (param.impl->backend == Backend::CPU) {
+        for (size_t i = 0; i < param.size(); i++) {
+          param.impl->data[i] -= param.impl->grad[i] * this->learning_rate;
+        }
+        /* if (this->momentum > 0.0f) { */
+        /*   Tensor v = param.grad() * this->momentum; */
+        /*   param -= v; */
+        /* } */
+      } else {
+        kernel_SGD_step(param.impl->cuda_data, param.impl->cuda_grad,
+                        param.size(), this->learning_rate);
       }
-      /* if (this->momentum > 0.0f) { */
-      /*   Tensor v = param.grad() * this->momentum; */
-      /*   param -= v; */
-      /* } */
     }
   }
 };

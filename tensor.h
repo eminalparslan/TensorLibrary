@@ -94,10 +94,10 @@ public:
       this->grad[i] = 0.0f;
     }
     if (backend == Backend::CUDA) {
-      cudaMalloc(&cuda_data, size * sizeof(float));
-      cudaMalloc(&cuda_grad, size * sizeof(float));
-      cudaMemset(cuda_data, 0, size * sizeof(float));
-      cudaMemset(cuda_grad, 0, size * sizeof(float));
+      cudaMalloc(&cuda_data, this->size * sizeof(float));
+      cudaMalloc(&cuda_grad, this->size * sizeof(float));
+      cudaMemset(cuda_data, 0, this->size * sizeof(float));
+      cudaMemset(cuda_grad, 0, this->size * sizeof(float));
     }
   }
 
@@ -105,8 +105,8 @@ public:
     delete[] data;
     delete[] grad;
     if (backend == Backend::CUDA) {
-      cudaFree(data);
-      cudaFree(grad);
+      cudaFree(cuda_data);
+      cudaFree(cuda_grad);
     }
   }
   
@@ -119,17 +119,17 @@ public:
     } else if (this->backend == Backend::CUDA) {
       if (backend == Backend::CPU) {
         cudaMemcpy(data, cuda_data, size * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(grad, cuda_grad, size * sizeof(float), cudaMemcpyDeviceToHost);
+        //cudaMemcpy(grad, cuda_grad, size * sizeof(float), cudaMemcpyDeviceToHost);
         cudaFree(cuda_data);
-        cudaFree(cuda_grad);
+        //cudaFree(cuda_grad);
       }
       this->backend = Backend::CPU;
     } else if (this->backend == Backend::CPU) {
       if (backend == Backend::CUDA) {
         cudaMalloc(&cuda_data, size * sizeof(float));
-        cudaMalloc(&cuda_grad, size * sizeof(float));
+        //cudaMalloc(&cuda_grad, size * sizeof(float));
         cudaMemcpy(cuda_data, data, size * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(cuda_grad, grad, size * sizeof(float), cudaMemcpyHostToDevice);
+        //cudaMemcpy(cuda_grad, grad, size * sizeof(float), cudaMemcpyHostToDevice);
       }
       this->backend = Backend::CUDA;
     }
@@ -148,18 +148,36 @@ public:
   }
 
   void backward() {
+    assert(realized);
+
     for (size_t i = 0; i < size; i++) {
-      // TODO: for CUDA
       grad[i] = 1.0f;
     }
+    /*if (backend == Backend::CUDA) {*/
+    /*  cudaMemcpy(cuda_grad, grad, size * sizeof(float), cudaMemcpyHostToDevice);*/
+    /*}*/
 
     std::vector<TensorImpl *> toposort;
     std::unordered_set<TensorImpl *> visited;
     topo_sort(visited, toposort);
 
     for (auto it = toposort.rbegin(); it != toposort.rend(); ++it) {
+      // TODO: remove
+      enum Backend prev = (*it)->backend;
+      (*it)->backend = Backend::CPU;
+
       if ((*it)->grad_fn != nullptr) (*it)->grad_fn();
+      if ((*it)->backend == Backend::CUDA) cudaDeviceSynchronize();
+
+      (*it)->backend = prev;
     }
+    
+    /*for (auto &item : toposort) {*/
+    /*  if (item->backend == Backend::CUDA) {*/
+    /*    cudaMemcpy(item->grad, item->cuda_grad, item->size * sizeof(float), cudaMemcpyDeviceToHost);*/
+    /*    item->backend = Backend::CPU;*/
+    /*  }*/
+    /*}*/
   }
 
   void print() {
@@ -167,6 +185,14 @@ public:
     std::cout << "[";
     for (size_t i = 0; i < this->size; i++) {
       std::cout << this->data[i] << ",";
+    }
+    std::cout << "]" << std::endl;
+  }
+  
+  void print_grad() {
+    std::cout << "[";
+    for (size_t i = 0; i < this->size; i++) {
+      std::cout << this->grad[i] << ",";
     }
     std::cout << "]" << std::endl;
   }
@@ -179,22 +205,25 @@ public:
     for (auto &item : toposort) {
       if (item->realized) continue;
       if (item->calc_fn != nullptr) item->calc_fn();
-      cudaDeviceSynchronize();
+      if (item->backend == Backend::CUDA) cudaDeviceSynchronize();
     }
     
     for (auto &item : toposort) {
       if (item->backend == Backend::CUDA) {
-        item->toDevice(Backend::CPU);
+        cudaMemcpy(item->data, item->cuda_data, item->size * sizeof(float), cudaMemcpyDeviceToHost);
       }
       item->realized = true;
     }
   }
 
   void zero_grad() {
-    // TODO: for CUDA
-    for (size_t i = 0; i < size; i++) {
-      grad[i] = 0.0f;
-    }
+    /*if (backend == Backend::CPU) {*/
+      for (size_t i = 0; i < size; i++) {
+        grad[i] = 0.0f;
+      }
+    /*} else if (backend == Backend::CUDA) {*/
+    /*  cudaMemset(cuda_grad, 0, size * sizeof(float));*/
+    /*}*/
   }
 
   std::shared_ptr<TensorImpl> add(const std::shared_ptr<TensorImpl> &other);
@@ -270,7 +299,7 @@ public:
   }
 
   float item() {
-    // TODO: for CUDA
+    assert(impl->backend == Backend::CPU);
     if (impl->size != 1) {
       throw std::runtime_error("item() only supported for size 1 Tensors");
     }
@@ -347,6 +376,7 @@ public:
   }
 
   Tensor &reshape(std::vector<int> shape) {
+    // FIXME: probably incorrect, matmul example isn't correct
     // -1 for inferring size
     int size = 1;
     int index = -1;
