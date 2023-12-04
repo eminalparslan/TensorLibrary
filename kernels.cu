@@ -1,93 +1,136 @@
 #include "kernels.h"
 
-const char *saxpy = "                                           \n\
-extern \"C\" __global__                                         \n\
-void saxpy(float a, float *x, float *y, float *out, size_t n)   \n\
-{                                                               \n\
-  size_t tid = blockIdx.x * blockDim.x + threadIdx.x;           \n\
-  if (tid < n) {                                                \n\
-    out[tid] = a * x[tid] + y[tid];                             \n\
-  }                                                             \n\
-}                                                               \n";
+const char *kernel_add = "                                              \n\
+extern \"C\" __global__ void add(int max_size, float *x, float *y,      \n\
+                                 float *out, int x_size, int y_size) {  \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < max_size; i += stride) {                      \n\
+    out[i] = x[i % x_size] + y[i % y_size];                             \n\
+  }                                                                     \n\
+}                                                                       \n";
 
-void test_saxpy() {
-  // Create an instance of nvrtcProgram with the SAXPY code string.
-  nvrtcProgram prog;
-  NVRTC_SAFE_CALL(nvrtcCreateProgram(&prog,      // prog
-                                     saxpy,      // buffer
-                                     "saxpy.cu", // name
-                                     0,          // numHeaders
-                                     NULL,       // headers
-                                     NULL));     // includeNames
-  // Compile the program with fmad disabled.
-  // Note: Can specify GPU target architecture explicitly with '-arch' flag.
-  const char *opts[] = {"--fmad=false"};
-  nvrtcResult compileResult = nvrtcCompileProgram(prog,  // prog
-                                                  1,     // numOptions
-                                                  opts); // options
-  // Obtain compilation log from the program.
-  size_t logSize;
-  NVRTC_SAFE_CALL(nvrtcGetProgramLogSize(prog, &logSize));
-  char *log = new char[logSize];
-  NVRTC_SAFE_CALL(nvrtcGetProgramLog(prog, log));
-  std::cout << log << '\n';
-  delete[] log;
-  if (compileResult != NVRTC_SUCCESS) {
-    exit(1);
-  }
-  // Obtain PTX from the program.
-  size_t ptxSize;
-  NVRTC_SAFE_CALL(nvrtcGetPTXSize(prog, &ptxSize));
-  char *ptx = new char[ptxSize];
-  NVRTC_SAFE_CALL(nvrtcGetPTX(prog, ptx));
-  // Destroy the program.
-  NVRTC_SAFE_CALL(nvrtcDestroyProgram(&prog));
-  // Load the generated PTX and get a handle to the SAXPY kernel.
-  CUdevice cuDevice;
-  CUcontext context;
-  CUmodule module;
-  CUfunction kernel;
-  CUDA_SAFE_CALL(cuInit(0));
-  CUDA_SAFE_CALL(cuDeviceGet(&cuDevice, 0));
-  CUDA_SAFE_CALL(cuCtxCreate(&context, 0, cuDevice));
-  CUDA_SAFE_CALL(cuModuleLoadDataEx(&module, ptx, 0, 0, 0));
-  CUDA_SAFE_CALL(cuModuleGetFunction(&kernel, module, "saxpy"));
-  // Generate input for execution, and create output buffers.
-  size_t n = NUM_THREADS * NUM_BLOCKS;
-  size_t bufferSize = n * sizeof(float);
-  float a = 5.1f;
-  float *hX = new float[n], *hY = new float[n], *hOut = new float[n];
-  for (size_t i = 0; i < n; ++i) {
-    hX[i] = static_cast<float>(i);
-    hY[i] = static_cast<float>(i * 2);
-  }
-  CUdeviceptr dX, dY, dOut;
-  CUDA_SAFE_CALL(cuMemAlloc(&dX, bufferSize));
-  CUDA_SAFE_CALL(cuMemAlloc(&dY, bufferSize));
-  CUDA_SAFE_CALL(cuMemAlloc(&dOut, bufferSize));
-  CUDA_SAFE_CALL(cuMemcpyHtoD(dX, hX, bufferSize));
-  CUDA_SAFE_CALL(cuMemcpyHtoD(dY, hY, bufferSize));
-  // Execute SAXPY.
-  void *args[] = {&a, &dX, &dY, &dOut, &n};
-  CUDA_SAFE_CALL(cuLaunchKernel(kernel, NUM_BLOCKS, 1, 1, // grid dim
-                                NUM_THREADS, 1, 1,        // block dim
-                                0, NULL,   // shared mem and stream
-                                args, 0)); // arguments
-  CUDA_SAFE_CALL(cuCtxSynchronize());
-  // Retrieve and print output.
-  CUDA_SAFE_CALL(cuMemcpyDtoH(hOut, dOut, bufferSize));
-  for (size_t i = 0; i < n; ++i) {
-    std::cout << a << " * " << hX[i] << " + " << hY[i] << " = " << hOut[i]
-              << '\n';
-  }
-  // Release resources.
-  CUDA_SAFE_CALL(cuMemFree(dX));
-  CUDA_SAFE_CALL(cuMemFree(dY));
-  CUDA_SAFE_CALL(cuMemFree(dOut));
-  CUDA_SAFE_CALL(cuModuleUnload(module));
-  CUDA_SAFE_CALL(cuCtxDestroy(context));
-  delete[] hX;
-  delete[] hY;
-  delete[] hOut;
-  delete[] ptx;
-}
+const char *kernel_neg = "                                              \n\
+extern \"C\" __global__ void neg(float *x, float *out, int x_size) {    \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    out[i] = -x[i];                                                     \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_mul = "                                              \n\
+extern \"C\" __global__ void mul(int max_size, float *x, float *y,      \n\
+                                 float *out, int x_size, int y_size) {  \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < max_size; i += stride) {                      \n\
+    out[i] = x[i % x_size] * y[i % y_size];                             \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_div = "                                              \n\
+extern \"C\" __global__ void div(int max_size, float *x, float *y,      \n\
+                                 float *out, int x_size, int y_size) {  \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < max_size; i += stride) {                      \n\
+    out[i] = x[i % x_size] / y[i % y_size];                             \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_log = "                                              \n\
+extern \"C\" __global__ void log(float *x, float *out, int x_size) {    \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    out[i] = logf(x[i]);                                                \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_exp = "                                              \n\
+extern \"C\" __global__ void exp(float *x, float *out, int x_size) {    \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    out[i] = expf(x[i]);                                                \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_sum = "                                              \n\
+extern \"C\" __global__ void sum(float *x, float *out, int x_size) {    \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    atomicAdd(out, x[i]);                                               \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_max = "                                              \n\
+extern \"C\" __global__ void max(float *x, float *out, int x_size) {    \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    atomicMax(out, x[i]);                                               \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+
+//  size_t n = x->shape.size();
+//  size_t m = y->shape.size();
+//  assert(n >= 1 && m >= 1);
+//  assert(x->shape[n - 1] == y->shape[m - 2]);
+//  size_t batch_size = 1;
+//  for (size_t i = 0; i < n - 2; i++) {
+//    assert(x->shape[i] == 1 || x->shape[i] == y->shape[i]);
+//    batch_size *= x->shape[i];
+//  }
+//  size_t dim0 = x->shape[n - 2];
+//  size_t dim1 = y->shape[m - 1];
+//  size_t dim2 = y->shape[m - 2];
+//      for (size_t i = 0; i < batch_size; i++) {
+//        for (size_t j = 0; j < dim0; j++) {
+//          for (size_t k = 0; k < dim1; k++) {
+//            for (size_t l = 0; l < dim2; l++) {
+//              result->data[i * dim0 * dim1 + j * dim1 + k] +=
+//                  this->data[i * dim0 * dim2 + j * dim2 + l] *
+//                  other->data[i * dim2 * dim1 + l * dim1 + k];
+//            }
+//          }
+//        }
+//      }
+
+// batched matmul
+const char *kernel_matmul = "                                                     \n\
+extern \"C\" __global__ void matmul(int max_size, float *x, float *y,             \n\
+                                    float *out, int x_size, int y_size, int dim0, \n\
+                                    int dim1, int dim2) {                         \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                              \n\
+  int stride = blockDim.x * gridDim.x;                                            \n\
+  for (int i = index; i < max_size; i += stride) {                                \n\
+    int batch = i / (dim0 * dim1 * dim2);                                         \n\
+    int j = (i - batch * dim0 * dim1 * dim2) / (dim1 * dim2);                     \n\
+    int k = (i - batch * dim0 * dim1 * dim2 - j * dim1 * dim2) / dim2;            \n\
+    int l = i - batch * dim0 * dim1 * dim2 - j * dim1 * dim2 - k * dim2;          \n\
+    out[i] = x[batch * dim0 * dim2 + j * dim2 + l] * y[batch * dim2 * dim1 + l * dim1 + k]; \n\
+  }                                                                               \n\
+}                                                                                 \n";
+
+const char *kernel_relu = "                                             \n\
+extern \"C\" __global__ void relu(float *x, float *out, int x_size) {   \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    out[i] = x[i] > 0 ? x[i] : 0;                                       \n\
+  }                                                                     \n\
+}                                                                       \n";
+
+const char *kernel_nll_loss = "                                         \n\
+extern \"C\" __global__ void nll_loss(float *x, float *y, float *out,   \n\
+                                      int x_size, int y_size) {         \n\
+  int index = blockIdx.x * blockDim.x + threadIdx.x;                    \n\
+  int stride = blockDim.x * gridDim.x;                                  \n\
+  for (int i = index; i < x_size; i += stride) {                        \n\
+    out[i] = -x[i * y_size + static_cast<int>(y[i]+0.001)];             \n\
+  }                                                                     \n\
+}                                                                       \n";

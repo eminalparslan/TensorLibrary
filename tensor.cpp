@@ -4,19 +4,62 @@
 
 #include "tensor.h"
 
+void launch_kernel(const char *kernel, const char *name, void *args[]) {
+  nvrtcProgram prog;
+  NVRTC_SAFE_CALL(nvrtcCreateProgram(&prog, kernel, name, 0, nullptr, nullptr));
+  const char *opts[] = {"--fmad=false"};
+  nvrtcResult compileResult = nvrtcCompileProgram(prog, 1, opts);
+
+  size_t logSize;
+  NVRTC_SAFE_CALL(nvrtcGetProgramLogSize(prog, &logSize));
+  std::cout << "Kernel compilation log:" << std::endl;
+  if (logSize > 1) {
+    char *log = new char[logSize];
+    NVRTC_SAFE_CALL(nvrtcGetProgramLog(prog, log));
+    std::cout << log << std::endl;
+    delete[] log;
+  }
+
+  if (compileResult != NVRTC_SUCCESS) {
+    throw std::runtime_error("Kernel compilation failed");
+  }
+  
+  size_t ptxSize;
+  NVRTC_SAFE_CALL(nvrtcGetPTXSize(prog, &ptxSize));
+  char *ptx = new char[ptxSize];
+  NVRTC_SAFE_CALL(nvrtcGetPTX(prog, ptx));
+  NVRTC_SAFE_CALL(nvrtcDestroyProgram(&prog));
+
+  CUmodule module;
+  CUfunction kernel_func;
+  CUDA_SAFE_CALL(cuModuleLoadDataEx(&module, ptx, 0, 0, 0));
+  CUDA_SAFE_CALL(cuModuleGetFunction(&kernel_func, module, name));
+  
+  CUDA_SAFE_CALL(cuLaunchKernel(kernel_func, NUM_BLOCKS, 1, 1, NUM_THREADS, 1, 1, 0, nullptr, args, 0));
+  // TODO: synchronize lazily
+  CUDA_SAFE_CALL(cuCtxSynchronize());
+  CUDA_SAFE_CALL(cuModuleUnload(module));
+}
+
 std::shared_ptr<TensorImpl>
 TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
   // TODO: check dimensions
+  assert(this->backend == other->backend);
   size_t max_size = std::max(this->size, other->size);
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
-      std::initializer_list<TensorImpl *>{this, other.get()});
+      std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
   // CUDA variant: allocate beforehand, launch kernel in calc_fn
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < max_size; i++) {
-      size_t this_index = i % this->size;
-      size_t other_index = i % other->size;
-      result->data[i] = this->data[this_index] + other->data[other_index];
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < max_size; i++) {
+        size_t this_index = i % this->size;
+        size_t other_index = i % other->size;
+        result->data[i] = this->data[this_index] + other->data[other_index];
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
+      launch_kernel(kernel_add, "add", args);
     }
   };
   result->grad_fn = [=]() {
@@ -32,10 +75,15 @@ TensorImpl::add(const std::shared_ptr<TensorImpl> &other) {
 
 std::shared_ptr<TensorImpl> TensorImpl::neg() {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < this->size; i++) {
-      result->data[i] = -this->data[i];
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < this->size; i++) {
+        result->data[i] = -this->data[i];
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_neg, "neg", args);
     }
   };
   result->grad_fn = [=]() {
@@ -54,15 +102,21 @@ TensorImpl::sub(const std::shared_ptr<TensorImpl> &other) {
 std::shared_ptr<TensorImpl>
 TensorImpl::mul(const std::shared_ptr<TensorImpl> &other) {
   // TODO: check dimensions
+  assert(this->backend == other->backend);
   size_t max_size = std::max(this->size, other->size);
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
-      std::initializer_list<TensorImpl *>{this, other.get()});
+      std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < max_size; i++) {
-      size_t this_index = i % this->size;
-      size_t other_index = i % other->size;
-      result->data[i] = this->data[this_index] * other->data[other_index];
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < max_size; i++) {
+        size_t this_index = i % this->size;
+        size_t other_index = i % other->size;
+        result->data[i] = this->data[this_index] * other->data[other_index];
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
+      launch_kernel(kernel_mul, "mul", args);
     }
   };
   result->grad_fn = [=]() {
@@ -78,8 +132,9 @@ TensorImpl::mul(const std::shared_ptr<TensorImpl> &other) {
 
 std::shared_ptr<TensorImpl> TensorImpl::mul(float other) {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
+    assert(result->backend == Backend::CPU);
     for (size_t i = 0; i < this->size; i++) {
       result->data[i] = this->data[i] * other;
     }
@@ -95,15 +150,21 @@ std::shared_ptr<TensorImpl> TensorImpl::mul(float other) {
 std::shared_ptr<TensorImpl>
 TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
   // TODO: check dimensions
+  assert(this->backend == other->backend);
   size_t max_size = std::max(this->size, other->size);
   auto result = std::make_shared<TensorImpl>(
       this->size == max_size ? this->shape : other->shape,
-      std::initializer_list<TensorImpl *>{this, other.get()});
+      std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < max_size; i++) {
-      size_t this_index = i % this->size;
-      size_t other_index = i % other->size;
-      result->data[i] = this->data[this_index] / other->data[other_index];
+    if (backend == Backend::CPU) {
+      for (size_t i = 0; i < max_size; i++) {
+        size_t this_index = i % this->size;
+        size_t other_index = i % other->size;
+        result->data[i] = this->data[this_index] / other->data[other_index];
+      }
+    } else if (backend == Backend::CUDA) {
+      void *args[] = {(void*)&max_size, &this->cuda_data, &other->cuda_data, &result->cuda_data, &this->size, &other->size};
+      launch_kernel(kernel_div, "div", args);
     }
   };
   result->grad_fn = [=]() {
@@ -121,127 +182,59 @@ TensorImpl::div(const std::shared_ptr<TensorImpl> &other) {
 
 std::shared_ptr<TensorImpl>
 TensorImpl::matmul(const std::shared_ptr<TensorImpl> &other) {
-  // TODO: support batching
   // TODO: test this function
   // TODO: understand order of dimensions in shape vs PyTorch
+  assert(this->backend == other->backend);
   size_t n = this->shape.size();
   size_t m = other->shape.size();
-  if (n == 1 && m == 1) {
-    // vector-vector dot product
-    assert(this->shape[0] == other->shape[0]);
-    auto result = std::make_shared<TensorImpl>(
-        std::initializer_list<int>{1},
-        std::initializer_list<TensorImpl *>{this, other.get()});
-    result->calc_fn = [=]() {
-      // calculate dot product
-      float dot = 0;
-      for (size_t i = 0; i < this->size; i++) {
-        dot += this->data[i] * other->data[i];
-      }
-      result->data[0] = dot;
-    };
-    result->grad_fn = [=]() {
-      for (size_t i = 0; i < this->size; i++) {
-        this->grad[i] += result->grad[i] * other->data[i];
-        other->grad[i] += result->grad[i] * this->data[i];
-      }
-    };
-    return result;
-  } else if (n == 2 && m == 2) {
-    // matrix-matrix multiplication
-    assert(this->shape[1] == other->shape[0]);
-    int p = this->shape[0];
-    int q = this->shape[1];
-    int r = other->shape[1];
-    auto result = std::shared_ptr<TensorImpl>(
-        new TensorImpl({p, r}, {this, other.get()}));
-    // TODO: optimize by blocking
-    result->calc_fn = [=]() {
-      for (int i = 0; i < p; i++) {
-        for (int j = 0; j < r; j++) {
-          float dot = 0;
-          for (int k = 0; k < q; k++) {
-            dot += this->data[i * q + k] * other->data[k * r + j];
-          }
-          result->data[i * r + j] = dot;
-        }
-      }
-    };
-    result->grad_fn = [=]() {
-      for (int i = 0; i < p; i++) {
-        for (int j = 0; j < r; j++) {
-          for (int k = 0; k < q; k++) {
-            this->grad[i * q + k] +=
-                result->grad[i * r + j] * other->data[k * r + j];
-            other->grad[k * r + j] +=
-                result->grad[i * r + j] * this->data[i * q + k];
-          }
-        }
-      }
-    };
-    return result;
-  } else if (n == 2 && m == 1) {
-    // matrix-vector multiplication
-    assert(this->shape[1] == other->shape[0]);
-    int p = this->shape[0];
-    int q = this->shape[1];
-    auto result = std::make_shared<TensorImpl>(
-        std::initializer_list<int>{p},
-        std::initializer_list<TensorImpl *>{this, other.get()});
-    result->calc_fn = [=]() {
-      for (int i = 0; i < p; i++) {
-        float dot = 0;
-        for (int k = 0; k < q; k++) {
-          dot += this->data[i * q + k] * other->data[k];
-        }
-        result->data[i] = dot;
-      }
-    };
-    result->grad_fn = [=]() {
-      for (int i = 0; i < p; i++) {
-        for (int k = 0; k < q; k++) {
-          this->grad[i * q + k] += result->grad[i] * other->data[k];
-          other->grad[k] += result->grad[i] * this->data[i * q + k];
-        }
-      }
-    };
-    return result;
-  } else if (n == 1 && m == 2) {
-    // vector-matrix multiplication
-    assert(this->shape[0] == other->shape[0]);
-    int p = this->shape[0];
-    int q = other->shape[1];
-    auto result = std::make_shared<TensorImpl>(
-        std::initializer_list<int>{q},
-        std::initializer_list<TensorImpl *>{this, other.get()});
-    result->calc_fn = [=]() {
-      for (int j = 0; j < q; j++) {
-        float dot = 0;
-        for (int k = 0; k < p; k++) {
-          dot += this->data[k] * other->data[k * q + j];
-        }
-        result->data[j] = dot;
-      }
-    };
-    result->grad_fn = [=]() {
-      for (int j = 0; j < q; j++) {
-        for (int k = 0; k < p; k++) {
-          this->grad[k] += result->grad[j] * other->data[k * q + j];
-          other->grad[k * q + j] += result->grad[j] * this->data[k];
-        }
-      }
-    };
-    return result;
-  } else if (n > 2) {
-    // batched matrix multiplication
-
-  } else if (m > 2) {
-    // batched matrix multiplication
-
-  } else {
-    assert(false);
+  assert(n >= 1 && m >= 1);
+  assert(this->shape[n - 1] == other->shape[m - 2]);
+  size_t batch_size = 1;
+  for (size_t i = 0; i < n - 2; i++) {
+    assert(this->shape[i] == 1 || this->shape[i] == other->shape[i]);
+    batch_size *= this->shape[i];
   }
-  return nullptr;
+  size_t dim0 = this->shape[n - 2];
+  size_t dim1 = other->shape[m - 1];
+  size_t dim2 = other->shape[m - 2];
+  auto result = std::make_shared<TensorImpl>(
+      std::initializer_list<int>{(int)batch_size, (int)dim0, (int)dim1},
+      std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
+  result->calc_fn = [=]() {
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < batch_size; i++) {
+        for (size_t j = 0; j < dim0; j++) {
+          for (size_t k = 0; k < dim1; k++) {
+            for (size_t l = 0; l < dim2; l++) {
+              result->data[i * dim0 * dim1 + j * dim1 + k] +=
+                  this->data[i * dim0 * dim2 + j * dim2 + l] *
+                  other->data[i * dim2 * dim1 + l * dim1 + k];
+            }
+          }
+        }
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {(void*)&batch_size, (void*)&dim0, (void*)&dim1, (void*)&dim2, &this->cuda_data, &other->cuda_data, &result->cuda_data};
+      launch_kernel(kernel_matmul, "matmul", args);
+    }
+  };
+  result->grad_fn = [=]() {
+    for (size_t i = 0; i < batch_size; i++) {
+      for (size_t j = 0; j < dim0; j++) {
+        for (size_t k = 0; k < dim1; k++) {
+          for (size_t l = 0; l < dim2; l++) {
+            this->grad[i * dim0 * dim2 + j * dim2 + l] +=
+                result->grad[i * dim0 * dim1 + j * dim1 + k] *
+                other->data[i * dim2 * dim1 + l * dim1 + k];
+            other->grad[i * dim2 * dim1 + l * dim1 + k] +=
+                result->grad[i * dim0 * dim1 + j * dim1 + k] *
+                this->data[i * dim0 * dim2 + j * dim2 + l];
+          }
+        }
+      }
+    }
+  };
+  return result;
 }
 
 // TODO: verify code
@@ -249,8 +242,9 @@ std::shared_ptr<TensorImpl> TensorImpl::transpose(size_t dim0, size_t dim1) {
   assert(dim0 < this->shape.size() && dim1 < this->shape.size());
   auto result = std::make_shared<TensorImpl>(
       std::initializer_list<int>{this->shape[dim1], this->shape[dim0]},
-      std::initializer_list<TensorImpl *>{this});
+      std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
+    assert(result->backend == Backend::CPU);
     for (int i = 0; i < this->shape[dim0]; i++) {
       for (int j = 0; j < this->shape[dim1]; j++) {
         result->data[j * this->shape[dim0] + i] =
@@ -271,10 +265,15 @@ std::shared_ptr<TensorImpl> TensorImpl::transpose(size_t dim0, size_t dim1) {
 
 std::shared_ptr<TensorImpl> TensorImpl::relu() {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < this->size; i++) {
-      result->data[i] = this->data[i] > 0.0f ? this->data[i] : 0.0f;
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < this->size; i++) {
+        result->data[i] = this->data[i] > 0.0f ? this->data[i] : 0.0f;
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_relu, "relu", args);
     }
   };
   result->grad_fn = [=]() {
@@ -287,8 +286,9 @@ std::shared_ptr<TensorImpl> TensorImpl::relu() {
 
 std::shared_ptr<TensorImpl> TensorImpl::sigmoid() {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
+    assert(result->backend == Backend::CPU);
     for (size_t i = 0; i < this->size; i++) {
       result->data[i] = 1.0f / (1.0f + std::exp(-this->data[i]));
     }
@@ -304,10 +304,15 @@ std::shared_ptr<TensorImpl> TensorImpl::sigmoid() {
 
 std::shared_ptr<TensorImpl> TensorImpl::log() {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < this->size; i++) {
-      result->data[i] = std::log(this->data[i]);
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < this->size; i++) {
+        result->data[i] = std::log(this->data[i]);
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_log, "log", args);
     }
   };
   result->grad_fn = [=]() {
@@ -320,10 +325,15 @@ std::shared_ptr<TensorImpl> TensorImpl::log() {
 
 std::shared_ptr<TensorImpl> TensorImpl::exp() {
   auto result = std::make_shared<TensorImpl>(
-      this->shape, std::initializer_list<TensorImpl *>{this});
+      this->shape, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < this->size; i++) {
-      result->data[i] = std::exp(this->data[i]);
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < this->size; i++) {
+        result->data[i] = std::exp(this->data[i]);
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_exp, "exp", args);
     }
   };
   result->grad_fn = [=]() {
@@ -336,10 +346,15 @@ std::shared_ptr<TensorImpl> TensorImpl::exp() {
 
 std::shared_ptr<TensorImpl> TensorImpl::sum() {
   auto result = std::make_shared<TensorImpl>(
-      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
+      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    for (size_t i = 0; i < this->size; i++) {
-      result->data[0] += this->data[i];
+    if (result->backend == Backend::CPU) {
+      for (size_t i = 0; i < this->size; i++) {
+        result->data[0] += this->data[i];
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_sum, "sum", args);
     }
   };
   result->grad_fn = [=]() {
@@ -352,11 +367,16 @@ std::shared_ptr<TensorImpl> TensorImpl::sum() {
 
 std::shared_ptr<TensorImpl> TensorImpl::max() {
   auto result = std::make_shared<TensorImpl>(
-      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
+      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
-    result->data[0] = this->data[0];
-    for (size_t i = 1; i < this->size; i++) {
-      result->data[0] = std::max(result->data[0], this->data[i]);
+    if (result->backend == Backend::CPU) {
+      result->data[0] = this->data[0];
+      for (size_t i = 1; i < this->size; i++) {
+        result->data[0] = std::max(result->data[0], this->data[i]);
+      }
+    } else if (result->backend == Backend::CUDA) {
+      void *args[] = {&this->cuda_data, &result->cuda_data, (void*)&this->size};
+      launch_kernel(kernel_max, "max", args);
     }
   };
   result->grad_fn = [=]() {
@@ -371,8 +391,9 @@ std::shared_ptr<TensorImpl> TensorImpl::max() {
 
 std::shared_ptr<TensorImpl> TensorImpl::mean() {
   auto result = std::make_shared<TensorImpl>(
-      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
+      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
+    assert(result->backend == Backend::CPU);
     for (size_t i = 0; i < this->size; i++) {
       result->data[0] += this->data[i];
     }
@@ -388,8 +409,9 @@ std::shared_ptr<TensorImpl> TensorImpl::mean() {
 
 std::shared_ptr<TensorImpl> TensorImpl::argmax() {
   auto result = std::make_shared<TensorImpl>(
-      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this});
+      std::initializer_list<int>{1}, std::initializer_list<TensorImpl *>{this}, this->backend);
   result->calc_fn = [=]() {
+    assert(result->backend == Backend::CPU);
     result->data[0] = 0;
     for (size_t i = 1; i < this->size; i++) {
       if (this->data[i] > this->data[(int)result->data[0]]) {
@@ -416,16 +438,16 @@ std::shared_ptr<TensorImpl> TensorImpl::log_softmax() {
 
 std::shared_ptr<TensorImpl>
 TensorImpl::nll_loss(const std::shared_ptr<TensorImpl> &other) {
+  assert(this->backend == other->backend);
   assert(this->shape.size() == 2 && other->shape.size() == 1);
   assert(this->shape[0] == other->shape[0]);
   int batch_size = this->shape[0];
   int num_classes = this->shape[1];
   auto result = std::make_shared<TensorImpl>(
-      other->shape, std::initializer_list<TensorImpl *>{this, other.get()});
+      other->shape, std::initializer_list<TensorImpl *>{this, other.get()}, this->backend);
   result->calc_fn = [=]() {
     for (int i = 0; i < batch_size; i++) {
-      result->data[i] -=
-          this->data[i * num_classes + (int)std::round(other->data[i])];
+      result->data[i] = -this->data[i * num_classes + (int)std::round(other->data[i])];
     }
   };
   result->grad_fn = [=]() {

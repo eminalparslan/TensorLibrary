@@ -1,7 +1,6 @@
 #include "nn.h"
 #include "optimizer.h"
 #include "tensor.h"
-#include "kernels.h"
 #include <fstream>
 #include <iostream>
 #include <cassert>
@@ -12,7 +11,7 @@ void reverse_bytes(char *bytes, int size) {
   }
 }
 
-int main() {
+void load_MNIST(std::vector<std::pair<int, std::vector<float>>> &images) {
   std::ifstream inputf("./MNIST_ORG/train-images.idx3-ubyte");
   std::ifstream labelf("./MNIST_ORG/train-labels.idx1-ubyte");
 
@@ -30,7 +29,6 @@ int main() {
   reverse_bytes((char *)&y1, 4);
   reverse_bytes((char *)&y2, 4);
 
-  std::vector<std::pair<int, std::vector<float>>> images;
   for (int i = 0; i < 60000; i++) {
     unsigned char c;
     labelf.read((char *)&c, 1);
@@ -45,8 +43,25 @@ int main() {
 
   inputf.close();
   labelf.close();
+}
 
-  nn::Linear l1 = nn::Linear(x1 * x2, 128);
+int main3() {
+  Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4});
+  a.toDevice(Backend::CUDA);
+  Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4});
+  b.toDevice(Backend::CUDA);
+  
+  Tensor c = a + b;
+  c();
+  c.toDevice(Backend::CPU);
+  c.print();
+}
+
+int main2() {
+  std::vector<std::pair<int, std::vector<float>>> images;
+  load_MNIST(images);
+
+  nn::Linear l1 = nn::Linear(28 * 28, 128);
   nn::Linear l2 = nn::Linear(128, 64);
   nn::Linear l3 = nn::Linear(64, 10);
 
@@ -54,7 +69,8 @@ int main() {
   auto loss = nn::CrossEntropyLoss();
 
   int steps = 30000;
-  /*assert(steps < (int)(images.size());*/
+  assert(steps < (int)(images.size()));
+
   for (int i = 0; i < steps; i++) {
     auto image = images[i];
     int label = image.first;
@@ -67,18 +83,18 @@ int main() {
 
     sgd.zero_grad();
 
-    Tensor a = Tensor(data, {1, x1 * x2});
+    Tensor a = Tensor(data, {1, 28 * 28});
     Tensor b = l1(a);
     Tensor c = b.relu();
     Tensor d = l2(c);
     Tensor e = d.relu();
     Tensor f = l3(e);
-    Tensor h = loss(f, Tensor({static_cast<float>(label)}, {1}));
+    Tensor h = loss(f.reshape({1, -1}), Tensor({static_cast<float>(label)}, {1}));
     // realize the computation graph
     h();
-
+    // compute the gradients
     h.backward();
-
+    // update the parameters
     sgd.step();
   }
 
@@ -95,7 +111,7 @@ int main() {
       item = item / 255;
     }
 
-    Tensor a = Tensor(data, {1, x1 * x2});
+    Tensor a = Tensor(data, {1, 28 * 28});
     Tensor b = l1(a);
     Tensor c = b.relu();
     Tensor d = l2(c);
@@ -113,15 +129,15 @@ int main() {
   return 0;
 }
 
-int main2() {
-  Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4});
-  Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4});
-  Tensor c = Tensor({-8.0f, 2.0f, -3.0f, 7.0f}, {4});
+int main() {
+  Tensor a = Tensor({1.0f, 2.0f, 3.0f, 4.0f}, {1, 4}).toDevice(Backend::CUDA);
+  Tensor b = Tensor({-3.0f, 8.0f, 2.0f, 1.0f}, {1, 4}).toDevice(Backend::CUDA);
+  Tensor c = Tensor({-8.0f, 2.0f, -3.0f, 7.0f}, {4}).toDevice(Backend::CUDA);
   Tensor e = a / b;
   Tensor d = -e + c;
-  Tensor f = Tensor({-2.0f, 9.0f, 3.0f, 5.0f}, {1, 4});
+  Tensor f = Tensor({-2.0f, 9.0f, 3.0f, 5.0f}, {1, 4}).toDevice(Backend::CUDA);
   Tensor g = d.relu() + f + e;
-  Tensor L = g.cross_entropy_loss(Tensor({1.0f}, {1}));
+  Tensor L = g.cross_entropy_loss(Tensor({1.0f}, {1}).toDevice(Backend::CUDA));
   L();
   L.print();
   L.backward();

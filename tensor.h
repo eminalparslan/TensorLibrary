@@ -12,10 +12,16 @@
 #include <memory>
 #include <unordered_set>
 #include <vector>
+#include <cuda_runtime.h>
+
+#include "kernels.h"
 
 namespace nn {
 class SGD;
 }
+
+enum class Backend { CPU, CUDA };
+
 
 // TODO: template for other types
 // TODO: requires_grad
@@ -28,13 +34,22 @@ private:
   // checking reference counts.
   std::function<void()> calc_fn{nullptr};
   std::function<void()> grad_fn{nullptr};
-
+  
 public:
   float *data{nullptr};
   float *grad{nullptr};
+
+  void *cuda_data{nullptr};
+  void *cuda_grad{nullptr};
+
   std::vector<int> shape;
   size_t size;
+
+  // TODO: stream per Tensor, lazily synchronize on streams when needed
+  Backend backend{Backend::CPU};
   bool realized{false};
+  
+  static CUDAInitializer cuda_initializer;
 
   TensorImpl(float num, std::vector<int> shape) : shape(shape) {
     this->size = 1;
@@ -68,8 +83,8 @@ public:
       : TensorImpl(list, {static_cast<int>(list.size())}) {}
 
   TensorImpl(std::vector<int> shape,
-             std::initializer_list<TensorImpl *> children)
-      : children(children), shape(shape) {
+             std::initializer_list<TensorImpl *> children, Backend backend)
+      : children(children), shape(shape), backend(backend) {
     this->size = 1;
     for (auto &item : shape) {
       this->size *= item;
@@ -80,14 +95,48 @@ public:
       this->data[i] = 0.0f;
       this->grad[i] = 0.0f;
     }
+    if (backend == Backend::CUDA) {
+      cudaMalloc(&cuda_data, size * sizeof(float));
+      cudaMalloc(&cuda_grad, size * sizeof(float));
+      cudaMemset(cuda_data, 0, size * sizeof(float));
+      cudaMemset(cuda_grad, 0, size * sizeof(float));
+    }
   }
 
   ~TensorImpl() {
     delete[] data;
     delete[] grad;
+    if (backend == Backend::CUDA) {
+      cudaFree(data);
+      cudaFree(grad);
+    }
   }
-
+  
   // TODO: consider carrying gradients through copy constructor
+  TensorImpl(const TensorImpl &other) = delete;
+  
+  void toDevice(Backend backend) {
+    if (this->backend == backend) {
+      return;
+    } else if (this->backend == Backend::CUDA) {
+      if (backend == Backend::CPU) {
+        std::cout << "CUDA -> CPU" << std::endl;
+        cudaMemcpy(data, cuda_data, size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(grad, cuda_grad, size * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaFree(cuda_data);
+        cudaFree(cuda_grad);
+      }
+      this->backend = Backend::CPU;
+    } else if (this->backend == Backend::CPU) {
+      if (backend == Backend::CUDA) {
+        cudaMalloc(&cuda_data, size * sizeof(float));
+        cudaMalloc(&cuda_grad, size * sizeof(float));
+        cudaMemcpy(cuda_data, data, size * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(cuda_grad, grad, size * sizeof(float), cudaMemcpyHostToDevice);
+      }
+      this->backend = Backend::CUDA;
+    }
+  }
 
   void topo_sort(std::unordered_set<TensorImpl *> &visited,
                  std::vector<TensorImpl *> &toposort) {
@@ -103,6 +152,7 @@ public:
 
   void backward() {
     for (size_t i = 0; i < size; i++) {
+      // TODO: for CUDA
       grad[i] = 1.0f;
     }
 
@@ -122,11 +172,14 @@ public:
     topo_sort(visited, toposort);
 
     for (auto &item : toposort) {
+      if (item->realized) continue;
       if (item->calc_fn != nullptr) item->calc_fn();
+      item->realized = true;
     }
   }
 
   void zero_grad() {
+    // TODO: for CUDA
     for (size_t i = 0; i < size; i++) {
       grad[i] = 0.0f;
     }
@@ -198,8 +251,14 @@ public:
   /*  }*/
   /*  return result;*/
   /*}*/
+  
+  Tensor &toDevice(Backend backend) {
+    impl->toDevice(backend);
+    return *this;
+  }
 
   float item() {
+    // TODO: for CUDA
     if (impl->size != 1) {
       throw std::runtime_error("item() only supported for size 1 Tensors");
     }
@@ -207,6 +266,7 @@ public:
   }
 
   void print() {
+    // TODO: check if realized
     std::cout << "[";
     for (size_t i = 0; i < impl->size; i++) {
       std::cout << impl->data[i] << ",";
@@ -215,6 +275,7 @@ public:
   }
 
   void print_grad() {
+    // TODO: check if grads are realized
     std::cout << "[";
     for (size_t i = 0; i < impl->size; i++) {
       std::cout << impl->grad[i] << ",";
